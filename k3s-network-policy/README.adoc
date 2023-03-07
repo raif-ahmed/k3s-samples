@@ -317,6 +317,7 @@ KUBE-NWPLCY-EM64V3NXOUG2TAJZ  all  --  anywhere             192.168.248.2       
 KUBE-NWPLCY-RJITOIYNFGLSMNHT  all  --  anywhere             192.168.248.2        /* run through nw policy deny-by-default */
 
 --
+----
 
 now we will watch the chain KUBE-NWPLCY-EM64V3NXOUG2TAJZ which is allow-same-namespace namespace sample1, at the same time we will run again our curl test
 
@@ -344,7 +345,6 @@ To convert NFLOG to log entries, install ulogd2 and configure [log1] to read on 
 ----
 apt install ulogd2
 ----
-
 
 To log all those packets to a file, ulogd2 requires the following configuration at /etc/ulogd.conf, already there a sample file created for you but following is the one i used
 
@@ -386,6 +386,7 @@ When a packet is blocked by network policy rules, a log message will appear in /
 [source,bash]
 ----
 # cat /var/log/ulog/syslogemu.log
+
 Mar  7 09:35:43 cluster-k3s-masters-a3620efa-5qgpt  IN=cni0 OUT=cni0 MAC=da:f6:6e:6e:f9:ce:ae:66:8d:d5:f8:d1:08:00 SRC=10.42.0.59 DST=10.42.0.60 LEN=60 TOS=00 PREC=0x00 TTL=64 ID=50378 DF PROTO=TCP SPT=47750 DPT=80 SEQ=3773744693 ACK=0 WINDOW=62377 SYN URGP=0 MARK=20000
 ----
 
