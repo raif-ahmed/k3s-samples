@@ -1,0 +1,402 @@
+
+= K3s NetworkPolicy 
+
+The idea is to give a sample for applying NetworkPolicy in a simple project and explaining how it works in K3s.
+
+[NOTE]
+====
+There is a common misunderstanding about K3s support for Networkpolicies, as K3s is using flannel CNI, and Flannel CNI doesn't support NetworkPolices. K3s use https://www.kube-router.io/[Kube-router], netpol controller for network policy 
+====
+
+.References :
+** https://kubernetes.io/docs/concepts/services-networking/network-policies[Kubernetes Network Policies]
+** https://github.com/k3s-io/k3s/blob/master/README.md[K3s - Lightweight Kubernetes]
+** https://docs.k3s.io/security/hardening-guide#networkpolicies[NetworkPolicies]
+** https://docs.k3s.io/advanced#additional-network-policy-logging[Additional Network Policy Logging]
+** https://cloudnativelabs.github.io/post/2017-05-1-kube-network-policies/[Kube-router: Enforcing Kubernetes network policies with iptables and ipset]
+
+:sectnums:
+
+==  Normal Pod inter-communications
+In K3s By default, all Pods in a namespace are accessible from other Pods in other namespaces.
+To explain how Pod inter-communications, lets try a simple nginx deployment which we will use for our testing as follow 
+
+.nginx.yaml
+[source,yaml]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ngnix-service
+spec:
+  selector:
+    app: nginx
+  type: ClusterIP
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80  
+----
+
+[source,bash]
+----
+# ceate first sample application
+kubectl create ns sample1
+kubectl apply -f nginx.yaml -n sample1
+
+# ceate Second sample application
+kubectl create ns sample2
+kubectl apply -f nginx.yaml -n sample2
+
+----
+
+Now lets try to play with curl to check communication accessibility
+
+[source,bash]
+----
+# From sample1 call sample2
+kubectl exec -n sample1 $(kubectl get po -n sample1 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample2.svc.cluster.local
+# From sample1 call sample1
+kubectl exec -n sample1 $(kubectl get po -n sample1 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample1.svc.cluster.local:80
+
+# From sample2 call sample1
+kubectl exec -n sample2 $(kubectl get po -n sample2 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample1.svc.cluster.local:80
+# From sample2 call sample2
+kubectl exec -n sample2 $(kubectl get po -n sample2 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample2.svc.cluster.local:80
+----
+
+==  Restrict Pod inter-communications with NetworkPolicy
+
+K3s bundles https://www.kube-router.io/[Kube-router] (netpol controller for network policy), together within its distribution
+
+There is a nice UI tool for generating Networkploicy, https://editor.cilium.io/[NetworkPolicy Editor]. Which you can use to create or start creating your NetworkPolicy
+A sample NetworkPolicy
+
+[source, yaml]
+----
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-network-policy
+  namespace: my-namespace
+spec:
+  podSelector:
+    matchLabels:
+      role: db <1>
+  policyTypes:
+  - Ingress
+  ingress: <2>
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          project: myproject
+    - podSelector:
+        matchLabels:
+          role: frontend
+    ports:
+    - protocol: TCP
+      port: 6379
+----
+<1> This selects particular Pods in the "current" namespace, to apply the policy on.
+<2> List of whitelist ingress rules. Each rule allows traffic which matches the from sections.
+
+There are four kinds of selectors that can be specified in an ingress from section:
+
+* *podSelector:* This selects particular Pods in the same namespace as the NetworkPolicy which should be allowed as ingress sources or egress destinations.
+* *namespaceSelector:* This selects particular namespaces for which all Pods should be allowed as ingress sources or egress destinations.
+* *namespaceSelector and podSelector:* A single from entry that specifies both namespaceSelector and podSelector selects particular Pods within particular namespaces.
+
+
+== Configuring multitenant isolation using NetworkPolicy
+
+Now lets configure multitenant isolation using NetworkPolicy.
+the following yaml will create multitenant isolation, so pods within same namesapce only are allowed to communicate, and also incoming communication from both ingress and monitoring
+
+.networkPolicy.yaml
+[source, yaml]
+----
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: deny-by-default
+spec:
+  podSelector: {}
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: allow-same-namespace
+spec:
+  podSelector: {}
+  ingress:
+  - from:
+    - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all-svclbtraefik-ingress
+spec:
+  podSelector: 
+    matchLabels:
+      svccontroller.k3s.cattle.io/svcname: traefik
+  ingress:
+  - {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all-traefik-v121-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  ingress:
+  - {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-cattle-monitoring-system
+spec:
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: cattle-monitoring-system
+  podSelector: {}
+  policyTypes:
+  - Ingress
+----
+
+
+[source,bash]
+----
+kubectl apply -f networkPolicy.yaml -n sample1
+kubectl apply -f networkPolicy.yaml -n sample2
+----
+
+Now lets try again previous curl to check communication accessibility
+
+[source,bash]
+----
+# From sample1 call sample2
+kubectl exec -n sample1 $(kubectl get po -n sample1 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample2.svc.cluster.local
+# From sample1 call sample1
+kubectl exec -n sample1 $(kubectl get po -n sample1 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample1.svc.cluster.local:80
+
+# From sample2 call sample1
+kubectl exec -n sample2 $(kubectl get po -n sample2 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample1.svc.cluster.local:80
+# From sample2 call sample2
+kubectl exec -n sample2 $(kubectl get po -n sample2 -l app=nginx -o name) -- curl --max-time 2 http://ngnix-service.sample2.svc.cluster.local:80
+----
+
+you should see now that communication between different namespace is blocked 
+
+==  Log & Debug NetworkPolicy
+Another aspect in NetworkPolicy is to be able to see the dropped packet due to the applied NetworkPolicy.
+So lets examine the generate iptables
+
+first we need to check where the pod is running, so we can know the node.
+
+[source,bash]
+----
+kubectl get po -o wide -A
+NAMESPACE             NAME                                                  READY   STATUS    RESTARTS      AGE    IP              NODE       NOMINATED NODE   READINESS GATES
+cattle-fleet-system   fleet-agent-d75c64848-6n7vb                           1/1     Running   3 (17d ago)   18d    192.168.249.2   node0   <none>           <none>
+cattle-system         cattle-cluster-agent-67795786b7-sgrnx                 1/1     Running   6 (17d ago)   18d    192.168.250.2   node1   <none>           <none>
+cattle-system         cattle-cluster-agent-67795786b7-zwfs5                 1/1     Running   6 (17d ago)   18d    192.168.249.5   node0   <none>           <none>
+kube-system           coredns-b96499967-l7wr8                               1/1     Running   3 (17d ago)   18d    192.168.249.4   node0   <none>           <none>
+kube-system           keepalived-kubeapi-vip-keepalived-ingress-vip-47mkz   1/1     Running   4 (17d ago)   20d    192.168.11.1    node0   <none>           <none>
+kube-system           keepalived-kubeapi-vip-keepalived-ingress-vip-j6fst   1/1     Running   2 (18d ago)   20d    192.168.11.3    node2   <none>           <none>
+kube-system           keepalived-kubeapi-vip-keepalived-ingress-vip-q4xjw   1/1     Running   3 (17d ago)   20d    192.168.11.2    node1   <none>           <none>
+kube-system           metrics-server-668d979685-l484v                       1/1     Running   4 (17d ago)   18d    192.168.249.3   node0   <none>           <none>
+sample1               nginx-6c8b449b8f-hhwhv                                1/1     Running   0             3d6h   192.168.248.2   node2   <none>           <none>
+sample2               nginx-6c8b449b8f-lptvn                                1/1     Running   0             3d6h   192.168.248.3   node2   <none>           <none>
+----
+
+[source,bash]
+----
+node2# iptables -L | grep KUBE-NWPLCY -B 2
+
+iptables -L | grep KUBE-NWPLCY -B 2
+target     prot opt source               destination
+
+Chain KUBE-NWPLCY-6MLFY7WSIVQ6X74S (1 references)
+target     prot opt source               destination
+
+Chain KUBE-NWPLCY-6ZMDCAWFW6IG7Y65 (0 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from all sources to dest pods selected by policy name: allow-all-svclbtraefik-ingress namespace sample1 */ match-set KUBE-DST-AZLS65URBWHIM4LV dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-CMW66LXPRKANGCCT (1 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from specified ipBlocks to dest pods selected by policy name: allow-from-cattle-monitoring-system namespace sample1 */ match-set KUBE-SRC-RCIDLRVZOORE5IEC src match-set KUBE-DST-T5UTRUNREWDWGD44 dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-DEFAULT (2 references)
+--
+MARK       all  --  anywhere             anywhere             /* rule to mark traffic matching a network policy */ MARK or 0x10000
+
+Chain KUBE-NWPLCY-EM64V3NXOUG2TAJZ (1 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from specified ipBlocks to dest pods selected by policy name: allow-same-namespace namespace sample1 */ match-set KUBE-SRC-DSEC5V52VOYVVZ4H src match-set KUBE-DST-5TPLTTXGTPDHQ2AH dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-IF5LSB2QJ2HY5MD6 (0 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from all sources to dest pods selected by policy name: allow-all-metrics-server namespace sample2 */ match-set KUBE-DST-SLTMPYMXLDXEGN2N dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-JLWJCN3BZPDM2H2S (0 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from all sources to dest pods selected by policy name: allow-all-traefik-v121-ingress namespace sample2 */ match-set KUBE-DST-Z5YXSV5A3HW7QEMX dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-KPPTNODTCDOZKNDG (1 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from specified ipBlocks to dest pods selected by policy name: allow-same-namespace namespace sample2 */ match-set KUBE-SRC-PPKM45TJKI5WPLEO src match-set KUBE-DST-OH37RT6TQZFFFG4U dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-LC5K2MMOQPHUDAFL (0 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from all sources to dest pods selected by policy name: allow-all-metrics-server namespace sample1 */ match-set KUBE-DST-OS7MZYVUHTNBW4D3 dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-LITCOYC5GR43MINT (1 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from specified ipBlocks to dest pods selected by policy name: allow-from-cattle-monitoring-system namespace sample2 */ match-set KUBE-SRC-TG364RXZIZFBYMO4 src match-set KUBE-DST-2CMQQKUI4WHO4LO2 dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-LRJI53H5EAIJQPB3 (0 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from all sources to dest pods selected by policy name: allow-all-svclbtraefik-ingress namespace sample2 */ match-set KUBE-DST-J3FS6JPAPN6WYKQ3 dst mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-OAOLJMET76F4DFR2 (0 references)
+--
+RETURN     all  --  anywhere             anywhere             /* rule to ACCEPT traffic from source pods to all destinations selected by policy name: default-allow-all namespace cattle-fleet-system */ match-set KUBE-SRC-ZG5DZU6W3SRJLEIO src mark match 0x10000/0x10000
+
+Chain KUBE-NWPLCY-RJITOIYNFGLSMNHT (1 references)
+target     prot opt source               destination
+
+Chain KUBE-NWPLCY-SKPLSSRNIO2OF3IY (0 references)
+--
+ACCEPT     all  --  anywhere             anywhere             /* rule for stateful firewall for pod */ ctstate RELATED,ESTABLISHED
+ACCEPT     all  --  anywhere             192.168.248.3        /* rule to permit the traffic traffic to pods when source is the pod's local node */ ADDRTYPE match src-type LOCAL
+KUBE-NWPLCY-DEFAULT  all  --  192.168.248.3        anywhere             /* run through default egress network policy  chain */
+KUBE-NWPLCY-6MLFY7WSIVQ6X74S  all  --  anywhere             192.168.248.3        /* run through nw policy deny-by-default */
+KUBE-NWPLCY-LITCOYC5GR43MINT  all  --  anywhere             192.168.248.3        /* run through nw policy allow-from-cattle-monitoring-system */
+KUBE-NWPLCY-KPPTNODTCDOZKNDG  all  --  anywhere             192.168.248.3        /* run through nw policy allow-same-namespace */
+--
+ACCEPT     all  --  anywhere             anywhere             /* rule for stateful firewall for pod */ ctstate RELATED,ESTABLISHED
+ACCEPT     all  --  anywhere             192.168.248.2        /* rule to permit the traffic traffic to pods when source is the pod's local node */ ADDRTYPE match src-type LOCAL
+KUBE-NWPLCY-DEFAULT  all  --  192.168.248.2        anywhere             /* run through default egress network policy  chain */
+KUBE-NWPLCY-CMW66LXPRKANGCCT  all  --  anywhere             192.168.248.2        /* run through nw policy allow-from-cattle-monitoring-system */
+KUBE-NWPLCY-EM64V3NXOUG2TAJZ  all  --  anywhere             192.168.248.2        /* run through nw policy allow-same-namespace */
+KUBE-NWPLCY-RJITOIYNFGLSMNHT  all  --  anywhere             192.168.248.2        /* run through nw policy deny-by-default */
+
+--
+
+now we will watch the chain KUBE-NWPLCY-EM64V3NXOUG2TAJZ which is allow-same-namespace namespace sample1, at the same time we will run again our curl test
+
+[source,bash]
+----
+# watch -n 2 -d iptables -L KUBE-NWPLCY-EM64V3NXOUG2TAJZ -nv
+
+Every 2.0s: iptables -L KUBE-NWPLCY-EM64V3NXOUG2TAJZ -nv                                                                                                                         node2: Mon Mar  6 20:18:38 2023
+Chain KUBE-NWPLCY-EM64V3NXOUG2TAJZ (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    4   240 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* rule to ACCEPT traffic from source pods to dest pods selected by policy name allow-same-namespace namespace sample1 */
+match-set KUBE-SRC-OPGXQ4TCHJJUUOWB src match-set KUBE-DST-5TPLTTXGTPDHQ2AH dst MARK or 0x10000
+    4   240 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* rule to ACCEPT traffic from source pods to dest pods selected by policy name allow-same-namespace namespace sample1 */
+match-set KUBE-SRC-OPGXQ4TCHJJUUOWB src match-set KUBE-DST-5TPLTTXGTPDHQ2AH dst mark match 0x10000/0x10000
+    0     0 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* rule to ACCEPT traffic from specified ipBlocks to dest pods selected by policy name: allow-same-namespace namespace sample1 */ match-set KUBE-SRC-DSEC5V52VOYVVZ4H src match-set KUBE-DST-5TPLTTXGTPDHQ2AH dst MARK or 0x10000
+    0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* rule to ACCEPT traffic from specified ipBlocks to dest pods selected by policy name: allow-same-namespace namespace sample1 */ match-set KUBE-SRC-DSEC5V52VOYVVZ4H src match-set KUBE-DST-5TPLTTXGTPDHQ2AH dst mark match 0x10000/0x10000
+----
+You see that during running the curl test the counter is keep changing showing the accepted and dropped packets.
+
+Packets dropped by network policies can also be logged. The packet is sent to the iptables NFLOG action, which shows the packet details, including the network policy that blocked it.
+
+To convert NFLOG to log entries, install ulogd2 and configure [log1] to read on group=100. Then, restart the ulogd2 service for the new config to be committed.following is the steps i followed, I'm having Ubuntu 20.04.3 LTS 
+
+[source,bash]
+----
+apt install ulogd2
+----
+
+
+To log all those packets to a file, ulogd2 requires the following configuration at /etc/ulogd.conf, already there a sample file created for you but following is the one i used
+
+[source,bash]
+----
+[global]                                                                                                                
+logfile="syslog"
+loglevel=3                                                                                                              
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_inppkt_NFLOG.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_filter_IFINDEX.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_filter_IP2STR.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_filter_IP2BIN.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_filter_PRINTPKT.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_filter_HWHDR.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_raw2packet_BASE.so"
+plugin="/usr/lib/x86_64-linux-gnu/ulogd/ulogd_output_LOGEMU.so"
+
+
+# this is a stack for logging packet send by system via LOGEMU
+stack=log1:NFLOG,base1:BASE,ifi1:IFINDEX,ip2str1:IP2STR,print1:PRINTPKT,emu1:LOGEMU
+
+[log1]
+group=100
+
+[emu1]
+file="/var/log/ulog/syslogemu.log"
+sync=1
+----
+
+After creating/updating the configuration file, ensure that ulogd2 is restarted and that the directory /var/log/ulog exists
+
+[source,bash]
+----
+systemctl restart ulogd2.service
+----
+
+When a packet is blocked by network policy rules, a log message will appear in /var/log/ulog/syslogemu.log.
+
+[source,bash]
+----
+# cat /var/log/ulog/syslogemu.log
+Mar  7 09:35:43 cluster-k3s-masters-a3620efa-5qgpt  IN=cni0 OUT=cni0 MAC=da:f6:6e:6e:f9:ce:ae:66:8d:d5:f8:d1:08:00 SRC=10.42.0.59 DST=10.42.0.60 LEN=60 TOS=00 PREC=0x00 TTL=64 ID=50378 DF PROTO=TCP SPT=47750 DPT=80 SEQ=3773744693 ACK=0 WINDOW=62377 SYN URGP=0 MARK=20000
+----
+
+[IMPORTANT]
+====
+Don't forget you need to check the iptables and ulogd on the node hosting the pod container where your NetworkPolicy ingress rule apply. 
+====
+
+If there is a lot of traffic, the logging file could grow very fast. To control that, set the "limit" and "limit-burst" iptables parameters approprietly by adding the following annotations to the network policy in question:
+
+* kube-router.io/netpol-nflog-limit=<LIMIT-VALUE>
+* kube-router.io.io/netpol-nflog-limit-burst=<LIMIT-BURST-VALUE>
+
+Default values are limit=10/minute and limit-burst=10. 

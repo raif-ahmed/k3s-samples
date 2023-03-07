@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+- https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset.yml
+
+patches:
+- target:
+    group: apps
+    kind: DaemonSet
+    name: kube-multus-ds
+    namespace: kube-system
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/2
+      value: "-multus-kubeconfig-file-host=/var/lib/rancher/k3s/agent/etc/cni/net.d/multus.d/multus.kubeconfig"
+    - op: replace
+      path: /spec/template/spec/volumes/0/hostPath/path
+      value: "/var/lib/rancher/k3s/agent/etc/cni/net.d"
+    - op: replace
+      path: /spec/template/spec/volumes/1/hostPath/path
+      value: "/var/lib/rancher/k3s/data/9de9bfcf367b723ef0ac73dd91761165a4a8ad11ad16a758d3a996264e60c612/bin"

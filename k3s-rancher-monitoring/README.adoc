@@ -1,0 +1,279 @@
+= K3s Kubernetes monitoring using Rancher Monitoring Chart 
+:toc:
+
+
+== References
+https://picluster.ricsanfre.com/docs/prometheus/#k3s-and-cluster-services-monitoring
+https://github.com/cablespaghetti/k3s-monitoring/issues/4
+https://github.com/k3s-io/k3s/issues/3619
+https://github.com/onedr0p/home-ops/issues/2378
+
+== Introduction
+
+Using Rancher monitoring chart for monitoring different K8s components
+according to so basically based on the helm chart values you give, the
+rancher monitoring define the scraping and Exposing Metrics
+
+So lets review Rancher documentation, just a refreshment
+
+following is quoting from
+https://ranchermanager.docs.rancher.com/v2.6/integrations-in-rancher/monitoring-and-alerting/how-monitoring-works#how-kubernetes-component-metrics-are-exposed[rancher
+documentation], if you like you can skip the documentation part and go directly to <<service-monitor,Understand the ServiceMonitor>>
+ 
+'''''
+
+== How Kubernetes Component Metrics are Exposed
+
+Prometheus scrapes metrics from deployments known as
+https://prometheus.io/docs/instrumenting/exporters/[exporters&#44;] which
+export the time series data in a format that Prometheus can ingest. In
+Prometheus, time series consist of streams of timestamped values
+belonging to the same metric and the same set of labeled dimensions.
+
+== Scraping Metrics with PushProx
+
+Certain internal Kubernetes components are scraped via a proxy deployed
+as part of Monitoring V2 called PushProx. For detailed information on
+PushProx, refer
+https://ranchermanager.docs.rancher.com/v2.6/integrations-in-rancher/monitoring-and-alerting/how-monitoring-works#how-pushprox-works[here]
+and to the above
+https://ranchermanager.docs.rancher.com/v2.6/integrations-in-rancher/monitoring-and-alerting/how-monitoring-works#1-architecture-overview[architecture]
+section.
+
+== Scraping Metrics
+
+The following Kubernetes components are directly scraped by Prometheus:
+
+* kubelet^1^
+* ingress-nginx^2^
+* coreDns/kubeDns
+* kube-api-server
+
+^1^Stars You can optionally use `hardenedKubelet.enabled` to use a PushProx,
+but that is not the default.
+
+^2^ For RKE and RKE2 clusters, ingress-nginx is deployed by default and
+treated as an internal Kubernetes component.
+
+== Scraping Metrics Based on Kubernetes Distribution
+
+Metrics are scraped differently based on the Kubernetes distribution.
+For help with terminology, refer link:#terminology[here]. For details,
+see the table below:
+
+How Metrics are Exposed to Prometheus
+
+[width="100%",cols="20%,20%,20%,20%,20%",options="header"]
+[[kubernetes-component]]
+|===
+|Kubernetes Component |RKE |RKE2 |KubeADM |K3s
+|kube-controller-manager |rkeControllerManager.enabled
+|rke2ControllerManager.enabled |kubeAdmControllerManager.enabled
+|k3sServer.enabled
+
+|kube-scheduler |rkeScheduler.enabled |rke2Scheduler.enabled
+|kubeAdmScheduler.enabled |k3sServer.enabled
+
+|etcd |rkeEtcd.enabled |rke2Etcd.enabled |kubeAdmEtcd.enabled |Not
+available
+
+|kube-proxy |rkeProxy.enabled |rke2Proxy.enabled |kubeAdmProxy.enabled
+|k3sServer.enabled
+
+|kubelet |Collects metrics directly exposed by kubelet |Collects metrics
+directly exposed by kubelet |Collects metrics directly exposed by
+kubelet |Collects metrics directly exposed by kubelet
+
+|ingress-nginx* |Collects metrics directly exposed by kubelet, exposed
+by rkeIngressNginx.enabled |Collects metrics directly exposed by
+kubelet, Exposed by rke2IngressNginx.enabled |Not available |Not
+available
+
+|coreDns/kubeDns |Collects metrics directly exposed by coreDns/kubeDns
+|Collects metrics directly exposed by coreDns/kubeDns |Collects metrics
+directly exposed by coreDns/kubeDns |Collects metrics directly exposed
+by coreDns/kubeDns
+
+|kube-api-server |Collects metrics directly exposed by kube-api-server
+|Collects metrics directly exposed by kube-api-server |Collects metrics
+directly exposed by kube-appi-server |Collects metrics directly exposed
+by kube-api-server
+|===
+
+* For RKE and RKE2 clusters, ingress-nginx is deployed by default and
+treated as an internal Kubernetes component.
+
+'''''
+
+End of quoting -)
+
+*So from the table above you notice one thing, etcd component is
+supported in RKE (rkeEtcd.enabled), RKE2(rke2Etcd.enabled), but for K3s
+(Not available).*
+
+so our goal in this blog is to enable monitoring of K3s embedded etcd
+using rancher Monitoring
+
+[[service-monitor]]
+=== Understand the ServiceMonitor
+In the above table <<kubernetes-component,How Metrics are Exposed to Prometheus>>, we saw that each component monitoring according to distribution is enabled but how this happened ?
+Through https://ranchermanager.docs.rancher.com/v2.5/reference-guides/monitoring-v2-configuration/servicemonitors-and-podmonitors#servicemonitors[ServiceMonitor]
+So it define a set of ServiceMonitor that match different K8s components according to distribution.
+
+So lets take a look
+[source,bash]
+----
+~ # kubectl get servicemonitor -A
+NAMESPACE                  NAME                                    AGE
+cattle-monitoring-system   rancher-monitoring-grafana              36d
+cattle-monitoring-system   rancher-monitoring-k3s-server           36d
+cattle-monitoring-system   rancher-monitoring-kube-state-metrics   36d
+cattle-monitoring-system   rancher-monitoring-node-exporter        36d
+cattle-monitoring-system   rancher-monitoring-operator             36d
+cattle-monitoring-system   rancher-monitoring-prometheus           36d
+default                    rancher-monitoring-apiserver            36d
+kube-system                rancher-monitoring-coredns              36d
+----
+
+then we can describe any servicemonitor and see its definition. 
+
+[source,bash]
+----
+~ # kubectl describe servicemonitor/rancher-monitoring-coredns -n kube-system
+Name:         rancher-monitoring-coredns
+Namespace:    kube-system
+Labels:       app=rancher-monitoring-coredns
+              app.kubernetes.io/instance=rancher-monitoring
+              app.kubernetes.io/managed-by=Helm
+              app.kubernetes.io/part-of=rancher-monitoring
+              app.kubernetes.io/version=100.1.3_up19.0.3
+              chart=rancher-monitoring-100.1.3_up19.0.3
+              heritage=Helm
+              objectset.rio.cattle.io/hash=740c737dfe6ceb85dbdd37ebbef66d581e8eada0
+              release=rancher-monitoring
+Annotations:  meta.helm.sh/release-name: rancher-monitoring
+              meta.helm.sh/release-namespace: cattle-monitoring-system
+              objectset.rio.cattle.io/id: default-cluster-monitoring-monitoring-operator
+API Version:  monitoring.coreos.com/v1
+Kind:         ServiceMonitor
+Metadata:
+  Creation Timestamp:  2022-12-22T09:03:54Z
+  Generation:          1
+  Managed Fields:
+    API Version:  monitoring.coreos.com/v1
+    Manager:         fleetagent
+    Operation:       Update
+    Time:            2022-12-22T09:03:54Z
+  Resource Version:  65725778
+  UID:               a50b8d9e-9783-4fb1-887a-6e011dc73ca2
+Spec:
+  Endpoints:
+    Bearer Token File:  /var/run/secrets/kubernetes.io/serviceaccount/token
+    Port:               http-metrics
+  Job Label:            jobLabel
+  Namespace Selector:
+    Match Names:
+      kube-system
+  Selector:
+    Match Labels:
+      App:      rancher-monitoring-coredns
+      Release:  rancher-monitoring
+Events:         <none>
+----
+so obviously we have different ServiceMonitor for different components except Etcd.
+
+=== Configure kubeEtcd
+The main idea is to use the idea mentioned in https://github.com/prometheus-operator/kube-prometheus/blob/main/docs/monitoring-external-etcd.md[monitoring-external-etcd] to monitor K3s etcd as if it is an external etcd.
+
+as mentioned we need to do two things;
+
+* Put the three etcd TLS client files (CA & cert & key) into a secret in the namespace, and have Prometheus Operator load the secret.
+* Create the following (to expose etcd metrics - port 2379) : Service, Endpoint, & ServiceMonitor.
+
+For the first step we will do the following
+
+. expose the etcd TLS client files so it is readable from the Prometheus Pod
++
+[source,bash]
+----
+chmod -R a+xr /var/lib/rancher/k3s/server/tls/etcd/
+----
+. Now we need to modify the rancher-monitoring link things together through kubeEtcd; 
+.. enable kubeEtcd 
+.. list the IP endpoints of the k3s server nodes where embedded etcd is running 
+.. mount the etcd folder on the hosts to prometheus pod
++
+kubectl edit apps/rancher-monitoring -n cattle-monitoring-system
+
+[source,yaml]
+----
+...
+    values:
+      ...
+      kubeEtcd:
+        enabled: true <1>
+        endpoints:  <2>
+        - 10.100.128.131
+        - 10.100.128.132
+        - 10.100.128.133
+        serviceMonitor: <3>
+          caFile: /etc/prometheus/secrets/etcd-client-cert/server-ca.crt
+          certFile: /etc/prometheus/secrets/etcd-client-cert/client.crt
+          enabled: true
+          keyFile: /etc/prometheus/secrets/etcd-client-cert/client.key
+          scheme: https
+          ...
+      prometheus:
+        ...
+        prometheusSpec: <4>
+          volumeMounts: 
+          - mountPath: /etc/prometheus/secrets/etcd-client-cert
+            name: etcd-client-cert
+          volumes:
+          - name: etcd-client-cert
+            hostPath:
+              path: /var/lib/rancher/k3s/server/tls/etcd
+          - emptyDir: {}
+            name: nginx-home
+          - configMap:
+              defaultMode: 438
+              name: prometheus-nginx-proxy-config
+            name: prometheus-nginx
+...
+----
+<1> enable kubeEtcd 
+<2> list the IP endpoints of the k3s server nodes where etcd is running 
+<3> define the etcd TLS files 
+<4> mount the etcd folder on the hosts to prometheus pod as hostPath
+
+wait till the deployment updated, and check the new servicemonitor for etcd.
+[source,bash]
+----
+~ # kubectl get servicemonitor -A
+NAMESPACE                  NAME                                    AGE
+cattle-monitoring-system   rancher-monitoring-grafana              36d
+cattle-monitoring-system   rancher-monitoring-k3s-server           36d
+cattle-monitoring-system   rancher-monitoring-kube-etcd            36d <1>
+cattle-monitoring-system   rancher-monitoring-kube-state-metrics   36d
+cattle-monitoring-system   rancher-monitoring-node-exporter        36d
+cattle-monitoring-system   rancher-monitoring-operator             36d
+cattle-monitoring-system   rancher-monitoring-prometheus           36d
+default                    rancher-monitoring-apiserver            36d
+kube-system                rancher-monitoring-coredns              36d
+----
+<1> The new Etcd servicemonitor
+
+
+
+kube-controller-manager-arg:
+- "bind-address=0.0.0.0"
+- "address=0.0.0.0"
+kube-proxy-arg:
+- "metrics-bind-address=0.0.0.0"
+kube-scheduler-arg:
+- "bind-address=0.0.0.0"
+etcd-expose-metrics: true
+
+--kube-controller-manager-arg="address=0.0.0.0" --kube-controller-manager-arg="bind-address=0.0.0.0"  --kube-scheduler-arg="address=0.0.0.0" --kube-scheduler-arg="bind-address=0.0.0.0" --kube-proxy-arg="metrics-bind-address=0.0.0.0" --etcd-expose-metrics=true
+
+ss -lnpt | grep "k3"
